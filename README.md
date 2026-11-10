@@ -60,11 +60,12 @@ pnpm build && pnpm start        # http://localhost:3100 (nonce 는 프로덕션 
 | `src/lib/zod-jitless.ts` | zod v4 의 `new Function("")` 프로브가 위반 리포트를 오염시키는 문제 차단 |
 | `next.config.ts` | nonce 가 필요 없는 정적 floor (proxy 가 안 닿는 경로용) |
 | `src/app/api/csp-report/route.ts` | `report-uri` 수집 엔드포인트 |
+| `src/app/sinks/` | **XSS 싱크 지도** — 입력이 도착하는 자리 16곳에서 React·Next 가 막는 것 / 못 막는 것 |
 
 환경 변수로 동작을 바꿔 볼 수 있습니다.
 
 ```bash
-CSP_MODE=off pnpm start                 # CSP 끄기 → /xss 에서 alert 실행됨
+CSP_MODE=off pnpm start                 # CSP 끄기 → /xss, /sinks 에서 프레임워크만의 방어 확인
 CSP_MODE=report-only pnpm start         # 막지 않고 보고만
 NEXT_PUBLIC_ZOD_JITLESS=0 pnpm build    # zod 조치 해제 → 홈에서 [report|enforce] script-src ← eval 위반 재현
 ```

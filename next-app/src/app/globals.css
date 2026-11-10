@@ -6,3 +6,5 @@ pre, code { font: 13px/1.5 ui-monospace, Menlo, monospace; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code); padding: 12px; border-radius: 8px; }
 .card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 16px 0; display: grid; gap: 8px; }
 .ok { color: var(--ok); } .fail { color: var(--fail); } .report { color: var(--report); }
+.sink-list { columns: 2 320px; } .sink-list span { color: var(--muted); font-size: 13px; }
+.sink-stage { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
