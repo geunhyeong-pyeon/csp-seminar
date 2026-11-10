@@ -1,0 +1,8 @@
+:root { --bg:#fbfaf7; --fg:#1f1d1a; --muted:#6b665e; --line:#e3ded4; --code:#f1ede4; --ok:#1f7a3f; --fail:#b3261e; --report:#a35c00; }
+@media (prefers-color-scheme: dark) { :root { --bg:#16151a; --fg:#ece8e1; --muted:#9a948a; --line:#2c2a31; --code:#211f26; --ok:#6fd08f; --fail:#ff8a80; --report:#ffb74d; } }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 -apple-system, sans-serif; }
+main { max-width: 860px; margin: 0 auto; padding: 24px 16px 80px; }
+pre, code { font: 13px/1.5 ui-monospace, Menlo, monospace; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code); padding: 12px; border-radius: 8px; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 16px 0; display: grid; gap: 8px; }
+.ok { color: var(--ok); } .fail { color: var(--fail); } .report { color: var(--report); }

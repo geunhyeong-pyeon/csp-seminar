@@ -1,0 +1,11 @@
+{
+  "name": "csp-seminar",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "playground": "node playground/server.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

