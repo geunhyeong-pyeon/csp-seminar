@@ -9,6 +9,7 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { ATTACKS, LABS, ORIGINS, buildPolicyHeader } from "./labs.mjs";
+import { TRY_PRESETS } from "./try-presets.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
 const MIME = { ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8" };
@@ -73,6 +74,7 @@ const renderIndex = () =>
 <ol class="labs">${LABS.map(
       (lab) => `<li><a href="/lab/${lab.id}">${escapeHtml(lab.title)}</a><p>${escapeHtml(lab.summary)}</p></li>`,
     ).join("")}</ol>
+<p><a href="/try"><b>CSP 정책 실험실</b></a> — 정책·전달 방식·HTML 을 직접 바꿔 보는 페이지</p>
 <p><a href="/violations">수집된 위반 리포트 (Lab 8)</a></p>
 </main>`,
   });
@@ -168,6 +170,102 @@ ${violationReports
 </main>`,
   });
 
+
+// ─────────────────────── /try 정책 실험실 ───────────────────────
+// 바깥 페이지(CSP 없음)가 iframe 으로 실험 문서를 띄우고, 실험 문서에서 난 위반 리포트를 모아 보여 준다.
+
+const tryReports = new Map();
+
+const TRY_MODES = {
+  header: "Content-Security-Policy 헤더",
+  "report-only": "Content-Security-Policy-Report-Only 헤더",
+  "two-headers": "Content-Security-Policy 헤더 2개",
+  "enforce+report": "enforce 헤더(정책 1) + Report-Only 헤더(정책 2)",
+  meta: "<meta http-equiv> 태그",
+};
+
+const readTryInput = (searchParams) => {
+  const preset = TRY_PRESETS.find((candidate) => candidate.id === searchParams.get("preset")) ?? TRY_PRESETS[0];
+  return {
+    preset,
+    mode: searchParams.get("mode") ?? preset.mode,
+    policy: searchParams.get("policy") ?? preset.policy,
+    policy2: searchParams.get("policy2") ?? preset.policy2 ?? "",
+    html: searchParams.get("html") ?? preset.html,
+  };
+};
+
+const renderTryPage = (input) => {
+  const run = randomBytes(6).toString("hex");
+  const frameQuery = new URLSearchParams({ run, mode: input.mode, policy: input.policy, policy2: input.policy2, html: input.html });
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><title>CSP 정책 실험실</title>
+<link rel="stylesheet" href="/static/style.css"></head><body><main>
+<nav><a href="/">← 목록</a></nav>
+<h1>CSP 정책 실험실</h1>
+<p>정책과 HTML 을 바꿔 가며 브라우저가 무엇을 막는지 본다. 아래 iframe 이 실험 문서이고, 그 문서에서 난 위반 리포트가 오른쪽에 쌓인다.</p>
+<ul class="presets">${TRY_PRESETS.map((preset) => `<li><a href="/try?preset=${preset.id}" class="${preset.id === input.preset.id ? "on" : ""}">${escapeHtml(preset.title)}</a></li>`).join("")}</ul>
+<form class="try-form">
+<input type="hidden" name="preset" value="${escapeHtml(input.preset.id)}">
+<label>전달 방식 <select name="mode">${Object.entries(TRY_MODES).map(([value, label]) => `<option value="${value}" ${value === input.mode ? "selected" : ""}>${escapeHtml(label)}</option>`).join("")}</select></label>
+<label>정책 1<textarea name="policy" rows="2">${escapeHtml(input.policy)}</textarea></label>
+<label>정책 2 (헤더 2개 모드용)<textarea name="policy2" rows="1">${escapeHtml(input.policy2)}</textarea></label>
+<label>HTML<textarea name="html" rows="6">${escapeHtml(input.html)}</textarea></label>
+<button>실행</button>
+</form>
+<div class="try-grid">
+<iframe id="try-frame" src="/try/frame?${escapeHtml(frameQuery)}" title="실험 문서"></iframe>
+<div><h2>위반 리포트</h2><ul id="try-reports"><li class="hint">(아직 없음)</li></ul></div>
+</div>
+<script>
+const render = (reports) => {
+  const list = document.getElementById("try-reports");
+  if (reports.length === 0) return;
+  list.replaceChildren(...reports.map((report) => {
+    const item = document.createElement("li");
+    item.className = report.disposition === "report" ? "report" : "fail";
+    item.textContent = "[" + report.disposition + "] " + report["effective-directive"] + " ← " + (report["blocked-uri"] || "?") + (report.source ? "  (" + report.source + ")" : "");
+    return item;
+  }));
+};
+setInterval(() => fetch("/try/reports?run=${run}").then((response) => response.json()).then(render), 700);
+</script>
+</main></body></html>`;
+};
+
+const renderTryFrame = ({ run, mode, policy, policy2, html }) => {
+  const reportUri = `report-uri /try/report?run=${run}`;
+  const headers = { "Cache-Control": "no-store" };
+  let head = "";
+  if (mode === "header" || mode === "two-headers" || mode === "enforce+report") {
+    headers["Content-Security-Policy"] = `${policy}; ${reportUri}`;
+  }
+  if (mode === "report-only") {
+    headers["Content-Security-Policy-Report-Only"] = `${policy}; ${reportUri}`;
+  }
+  if (mode === "two-headers" && policy2) {
+    // Node 는 같은 이름의 헤더를 배열로 주면 두 줄로 보낸다
+    headers["Content-Security-Policy"] = [`${policy}; ${reportUri}`, `${policy2}; ${reportUri}`];
+  }
+  if (mode === "enforce+report" && policy2) {
+    headers["Content-Security-Policy-Report-Only"] = `${policy2}; ${reportUri}`;
+  }
+  if (mode === "meta") {
+    // meta 는 report-uri 를 무시하므로, meta 보다 먼저 실행되는 리스너가 위반을 대신 전달한다
+    head = `<script>
+document.addEventListener("securitypolicyviolation", (event) => {
+  navigator.sendBeacon("/try/report?run=${run}", JSON.stringify({ "csp-report": {
+    disposition: event.disposition, "effective-directive": event.effectiveDirective,
+    "blocked-uri": event.blockedURI, source: "meta 리스너" } }));
+});
+document.addEventListener("DOMContentLoaded", () => document.body.prepend("✅ meta 앞의 인라인 script 실행됨 · "));
+</script>
+<meta http-equiv="Content-Security-Policy" content="${escapeHtml(policy)}">`;
+  }
+  const body = `<!doctype html><html lang="ko"><head><meta charset="utf-8">${head}</head>
+<body style="font:14px sans-serif">${html}</body></html>`;
+  return { headers, body };
+};
+
 const appServer = createServer(async (request, response) => {
   const url = new URL(request.url, ORIGINS.app);
   const { pathname, searchParams } = url;
@@ -191,6 +289,37 @@ const appServer = createServer(async (request, response) => {
     const headers = { "Set-Cookie": cookie, "Cache-Control": "no-store" };
     if (policy) headers[policy.name] = policy.value;
     return send(response, 200, html, headers);
+  }
+
+  if (pathname === "/try") {
+    return send(response, 200, renderTryPage(readTryInput(searchParams)));
+  }
+
+  if (pathname === "/try/frame") {
+    const { headers, body } = renderTryFrame({
+      run: searchParams.get("run") ?? "none",
+      mode: searchParams.get("mode") ?? "header",
+      policy: searchParams.get("policy") ?? "",
+      policy2: searchParams.get("policy2") ?? "",
+      html: searchParams.get("html") ?? "",
+    });
+    return send(response, 200, body, headers);
+  }
+
+  if (pathname === "/try/report" && request.method === "POST") {
+    const run = searchParams.get("run") ?? "none";
+    const body = await readBody(request);
+    try {
+      const report = JSON.parse(body)["csp-report"];
+      if (report) tryReports.set(run, [...(tryReports.get(run) ?? []), report]);
+    } catch {}
+    response.writeHead(204);
+    return response.end();
+  }
+
+  if (pathname === "/try/reports") {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    return response.end(JSON.stringify(tryReports.get(searchParams.get("run") ?? "") ?? []));
   }
 
   if (pathname === "/csp-report" && request.method === "POST") {
@@ -218,6 +347,13 @@ const appServer = createServer(async (request, response) => {
   send(response, 404, "not found");
 });
 
+
+const SVG_OK = `<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><rect width="40" height="40" rx="6" fill="#2a5bd7"/></svg>`;
+const sendSvg = (response) => {
+  response.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-store" });
+  response.end(SVG_OK);
+};
+
 // ─────────────────────────── :3001 "신뢰하는" CDN ───────────────────────────
 
 const cdnServer = createServer((request, response) => {
@@ -228,6 +364,10 @@ const cdnServer = createServer((request, response) => {
     const callback = url.searchParams.get("callback") ?? "callback";
     response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
     return response.end(`${callback}({"weather":"sunny"})`);
+  }
+
+  if (url.pathname === "/img/ok.svg") {
+    return sendSvg(response);
   }
 
   if (url.pathname === "/analytics.js") {
@@ -276,6 +416,10 @@ const attackerServer = createServer(async (request, response) => {
   if (pathname === "/phish" && request.method === "POST") {
     recordLoot("가짜 로그인 폼", await readBody(request));
     return send(response, 200, "<h1>로그인 되었습니다 :)</h1><p>(비밀번호는 공격자에게 갔다)</p>");
+  }
+
+  if (pathname === "/img/ok.svg" || pathname === "/other.svg") {
+    return sendSvg(response);
   }
 
   if (pathname === "/evil.js") {

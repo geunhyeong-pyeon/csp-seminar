@@ -40,6 +40,12 @@ node playground/server.mjs
 | 8 | `Content-Security-Policy-Report-Only` | 막지 않고 보고만. `/violations` 에 리포트 수집. 라이브러리의 `new Function` 프로브(zod) 함정 |
 | 9 | `frame-ancestors` | 클릭재킹: 공격자 페이지(`:4000/clickjack`)가 우리 페이지를 투명 iframe 으로 덮음 |
 
+### CSP 정책 실험실 — `/try`
+
+정책 · 전달 방식(헤더 / Report-Only / 헤더 2개 / `<meta>`) · HTML 을 직접 바꿔 보며 브라우저 판정을 확인하는 페이지.
+실험 문서는 iframe 으로 뜨고, 그 문서에서 난 위반 리포트(`report-uri`)가 옆에 쌓입니다.
+프리셋: 기본 · 따옴표 실수 · 인라인 판정 종류 · `default-src` 폴백 · `*` 와 `data:` · 호스트/서브도메인/경로 매칭 · 정책 두 개 = 교집합 · nonce 와 `'unsafe-inline'` · `<meta>` 의 한계 · enforce + Report-Only · `frame-ancestors`.
+
 > ⚠️ 의도적으로 취약하게 만든 코드입니다. 로컬 데모 용도로만 실행하세요.
 
 ## 2. next-app — Next.js 16 실전 적용

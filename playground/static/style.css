@@ -18,3 +18,12 @@ pre.header { background: var(--code); border: 1px solid var(--line); padding: 12
 li.ok { color: var(--ok); } li.fail { color: var(--fail); } li.pwn { color: var(--pwn); font-weight: 600; } li.report { color: var(--report); }
 .phish, .bank { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; border: 1px solid var(--line); padding: 12px; border-radius: 8px; margin: 12px 0; }
 .hint { color: var(--muted); }
+.presets { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; list-style: none; }
+.presets a { display: block; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; text-decoration: none; font-size: 13px; }
+.presets a.on { border-color: var(--accent); }
+.try-form { display: grid; gap: 8px; margin: 12px 0; }
+.try-form label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.try-form textarea { font: 13px ui-monospace, Menlo, monospace; }
+.try-grid { display: grid; gap: 16px; grid-template-columns: 1fr; }
+@media (min-width: 720px) { .try-grid { grid-template-columns: 1fr 1fr; } }
+#try-frame { width: 100%; height: 220px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
