@@ -8,7 +8,7 @@ import { createServer } from "node:http";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ATTACKS, LABS, ORIGINS, buildPolicyHeader } from "./labs.mjs";
+import { CLICKJACK_LAB_ID, LABS, ORIGINS, PARTS, buildPolicyHeader, resolveAttacks } from "./labs.mjs";
 import { TRY_PRESETS } from "./try-presets.mjs";
 
 const HERE = fileURLToPath(new URL(".", import.meta.url));
@@ -51,6 +51,13 @@ const serveFile = async (response, path, headers = {}) => {
 
 const violationReports = [];
 
+// 공격자가 "프로필 첨부" 기능으로 미리 올려 둔 파일들. 내용은 전부 JS 다.
+const UPLOADS = {
+  "notes.txt": { type: "text/plain; charset=utf-8", body: "lab.pwn('uploaded notes.txt (text/plain)');" },
+  "avatar.png": { type: "image/png", body: "lab.pwn('uploaded avatar.png (image/png)');" },
+  "widget.js": { type: "text/javascript; charset=utf-8", body: "lab.pwn('uploaded widget.js (text/javascript)');" },
+};
+
 const layout = ({ title, nonce, head = "", body }) => `<!doctype html>
 <html lang="ko">
 <head>
@@ -63,6 +70,11 @@ ${head}
 <body>${body}</body>
 </html>`;
 
+const renderLabList = (partId) =>
+  LABS.filter((lab) => lab.part === partId)
+    .map((lab) => `<li><a href="/lab/${lab.id}">${escapeHtml(lab.title)}</a><p>${escapeHtml(lab.summary)}</p></li>`)
+    .join("");
+
 const renderIndex = () =>
   layout({
     title: "CSP Playground",
@@ -71,11 +83,14 @@ const renderIndex = () =>
 <h1>CSP Playground</h1>
 <p>같은 취약한 페이지에 CSP만 바꿔 가며 공격이 어떻게 막히는지 본다.
 옆 창에 <a href="${ORIGINS.attacker}" target="_blank">공격자 대시보드 (:4000)</a>를 띄워 두자.</p>
-<ol class="labs">${LABS.map(
-      (lab) => `<li><a href="/lab/${lab.id}">${escapeHtml(lab.title)}</a><p>${escapeHtml(lab.summary)}</p></li>`,
-    ).join("")}</ol>
-<p><a href="/try"><b>CSP 정책 실험실</b></a> — 정책·전달 방식·HTML 을 직접 바꿔 보는 페이지</p>
-<p><a href="/violations">수집된 위반 리포트 (Lab 8)</a></p>
+<h2>${escapeHtml(PARTS[0].title)}</h2>
+<ol class="labs">${renderLabList("part1")}</ol>
+<p><a href="/try"><b>CSP 정책 실험실</b></a> — 2장. 정책 · 전달 방식 · HTML 을 직접 바꿔 보며 브라우저 판정을 확인한다</p>
+<p class="hint">1장 XSS 싱크 지도는 next-app 의 <code>/sinks</code> (README 참고)</p>
+<details><summary><b>${escapeHtml(PARTS[1].title)}</b> (다음 시간)</summary>
+<ol class="labs">${renderLabList("part2")}</ol>
+<p><a href="/violations">수집된 위반 리포트 (2부 Lab 5)</a></p>
+</details>
 </main>`,
   });
 
@@ -94,9 +109,8 @@ const renderLab = (lab, query) => {
     })
     .join("");
 
-  const attacks = lab.attacks
-    .map((key) => {
-      const attack = ATTACKS[key];
+  const attacks = resolveAttacks(lab, query)
+    .map((attack) => {
       const next = new URLSearchParams(query);
       next.set("q", attack.payload);
       return `<li><a href="?${escapeHtml(next)}">${escapeHtml(attack.label)}</a><code>${escapeHtml(attack.payload)}</code></li>`;
@@ -112,6 +126,13 @@ const renderLab = (lab, query) => {
   const legitAfterContent = (lab.legitScriptsAfterContent ?? [])
     .map((src) => `<script src="${src}" nonce="${nonce}"></script>`)
     .join("");
+
+  const uncovered = lab.uncovered?.(query);
+  const uncoveredBlock = uncovered
+    ? `<h2>공격 (CSP 없는 같은 origin 페이지에서)</h2>
+<ul class="attacks"><li><a href="/account" target="_blank">보호된 페이지 /account 열어 보기 (CSP ✅)</a></li>
+<li><a href="${escapeHtml(uncovered.href)}" target="_blank">/legacy/search 의 XSS 로 /account 비밀값 훔치기</a><code>${escapeHtml(uncovered.payload)}</code></li></ul>`
+    : "";
 
   const clickjack = lab.clickjack
     ? `<p class="hint">공격자 페이지에서 이 화면을 iframe으로 덮어 본다:
@@ -134,6 +155,7 @@ const renderLab = (lab, query) => {
 <div class="toggles">${toggles}</div>
 ${policyBox}
 ${attacks ? `<h2>공격 페이로드 (클릭하면 ?q= 에 주입)</h2><ul class="attacks">${attacks}</ul>` : ""}
+${uncoveredBlock}
 ${clickjack}
 <form class="search"><input name="q" value="${escapeHtml(searchTerm)}" placeholder="검색어">${[...query]
       .filter(([key]) => key !== "q")
@@ -144,6 +166,7 @@ ${clickjack}
 <!-- 취약점: 사용자 입력을 이스케이프 없이 그대로 출력한다 -->
 <div>"${searchTerm}" 에 대한 결과가 없습니다.</div>
 </section>
+${lab.extraBody?.(query) ?? ""}
 ${legitInline}
 ${legitAfterContent}
 <h2>실행 로그</h2><ul id="lab-log"></ul>
@@ -291,6 +314,51 @@ const appServer = createServer(async (request, response) => {
     return send(response, 200, html, headers);
   }
 
+  if (pathname === "/account") {
+    return send(
+      response,
+      200,
+      layout({
+        title: "내 계정",
+        nonce: "",
+        body: `<main><nav><a href="/">← 목록</a></nav><h1>내 계정 (CSP ✅)</h1>
+<p>이 페이지는 <code>script-src 'self'</code> 를 받는다. 여기에는 주입 지점도 없다.</p>
+<p>API 토큰: <code id="secret">sk-demo-7f3a9c2e-account-token</code></p></main>`,
+      }),
+      { "Content-Security-Policy": "script-src 'self'", "Cache-Control": "no-store" },
+    );
+  }
+
+  if (pathname === "/legacy/search") {
+    const searchTerm = searchParams.get("q") ?? "";
+    const isCovered = searchParams.get("cover") === "1";
+    const headers = { "Cache-Control": "no-store" };
+    if (isCovered) headers["Content-Security-Policy"] = "script-src 'self'";
+    return send(
+      response,
+      200,
+      layout({
+        title: "레거시 검색",
+        nonce: "",
+        body: `<main><nav><a href="/lab/p1-7-uncovered-page">← Lab 7</a></nav>
+<h1>레거시 검색 (CSP ${isCovered ? "✅" : "❌"})</h1>
+<p class="hint">오래전에 만든 페이지. 아무도 CSP 를 붙이지 않았다.</p>
+<section class="result"><div>"${searchTerm}" 에 대한 결과가 없습니다.</div></section>
+<h2>CSP 위반 (securitypolicyviolation 이벤트)</h2><ul id="lab-violations"></ul></main>`,
+      }),
+      headers,
+    );
+  }
+
+  const uploadMatch = pathname.match(/^\/(uploads|uploads-nosniff)\/([\w.-]+)$/);
+  if (uploadMatch && UPLOADS[uploadMatch[2]]) {
+    const upload = UPLOADS[uploadMatch[2]];
+    const headers = { "Content-Type": upload.type, "Cache-Control": "no-store" };
+    if (uploadMatch[1] === "uploads-nosniff") headers["X-Content-Type-Options"] = "nosniff";
+    response.writeHead(200, headers);
+    return response.end(upload.body);
+  }
+
   if (pathname === "/try") {
     return send(response, 200, renderTryPage(readTryInput(searchParams)));
   }
@@ -370,6 +438,18 @@ const cdnServer = createServer((request, response) => {
     return sendSvg(response);
   }
 
+  // 공개 CDN: 누구나 올린 패키지를 그대로 서빙한다. 이 패키지는 공격자가 올렸다.
+  if (url.pathname === "/npm/totally-legit-utils@1.0.0/index.js") {
+    response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8" });
+    return response.end("lab.pwn('public CDN package by attacker');");
+  }
+
+  // 허용 경로(/libs/) 아래의 오픈 리다이렉트
+  if (url.pathname === "/libs/go") {
+    response.writeHead(302, { Location: url.searchParams.get("to") ?? "/" });
+    return response.end();
+  }
+
   if (url.pathname === "/analytics.js") {
     return serveFile(response, join(HERE, "static", "third-party-analytics.js"));
   }
@@ -445,7 +525,7 @@ label{position:fixed;right:16px;top:16px;z-index:10;background:#fff}
 <h1>🎁 축하합니다! 경품에 당첨되었습니다</h1>
 <div class="bait">경품 받기</div>
 <label><input type="checkbox" onchange="document.body.style.setProperty('--o', this.checked ? 0.5 : 0.0001)"> iframe 보이기</label>
-<iframe src="${ORIGINS.app}/lab/9-frame-ancestors?fa=${fa}"></iframe>`,
+<iframe src="${ORIGINS.app}/lab/${CLICKJACK_LAB_ID}?fa=${fa}"></iframe>`,
     );
   }
 

@@ -28,17 +28,32 @@ node playground/server.mjs
 각 랩 화면에서 공격 페이로드를 클릭하면 `?q=` 에 주입되고, 아래 **실행 로그 / CSP 위반** 목록과
 공격자 대시보드에서 결과를 확인할 수 있습니다. 토글로 정책을 켜고 끄면서 비교합니다.
 
+#### 1부 — XSS · CSP 기본 · 흔한 실패
+
 | 랩 | 정책 | 보여 주는 것 |
 | --- | --- | --- |
-| 1 | 없음 | 인라인 핸들러·외부 스크립트 모두 실행 → 쿠키 탈취 |
-| 2 | `script-src 'self' 'unsafe-inline'` | 외부는 막지만 인라인 주입은 그대로 — `'unsafe-inline'` = CSP 무력화 |
-| 3 | `script-src 'self' <cdn>` | allowlist 는 허용한 호스트의 **JSONP** 하나로 우회된다 |
-| 4 | `script-src 'nonce-…'` | 이번 응답의 nonce 를 가진 스크립트만 실행. 고정 nonce(`static=1`)면 무의미 |
-| 5 | `+ 'strict-dynamic'` | nonce 로 신뢰한 로더가 `createElement` 로 추가한 스크립트에 신뢰 전파 (gtag.js 패턴) |
-| 6 | `connect-src` / `default-src` | 공급망 공격: script-src 로는 못 막는 "우리 번들 속 악성 의존성"의 유출 경로 차단 |
-| 7 | `base-uri` · `form-action` · `object-src` | `<base>` 주입으로 우리 nonce 스크립트 하이재킹, 가짜 로그인 폼으로 비밀번호 전송 |
-| 8 | `Content-Security-Policy-Report-Only` | 막지 않고 보고만. `/violations` 에 리포트 수집. 라이브러리의 `new Function` 프로브(zod) 함정 |
-| 9 | `frame-ancestors` | 클릭재킹: 공격자 페이지(`:4000/clickjack`)가 우리 페이지를 투명 iframe 으로 덮음 |
+| 1부 Lab 1 | 없음 | 인라인 핸들러·외부 스크립트 모두 실행 → 쿠키 탈취 |
+| 1부 Lab 2 | `script-src 'self' 'unsafe-inline'` | 외부는 막지만 인라인 주입은 그대로 — `'unsafe-inline'` = CSP 무력화 |
+| 1부 Lab 3 | `script-src 'self'` + `data:` / `http:` 토글 | 스킴 소스: `data:` URL 스크립트, "모든 서버" 허용 |
+| 1부 Lab 4 | `script-src 'self'` + `'unsafe-eval'` 토글 | 우리 라이브러리의 `new Function` 이 **스크립트 가젯**이 되어 속성 하나로 실행 |
+| 1부 Lab 5 | `script-src 'self' <cdn>` (+ `/libs/` 경로 제한 토글) | allowlist 우회: JSONP · 공개 CDN 패키지 · 리다이렉트 뒤 경로 무시 |
+| 1부 Lab 6 | `script-src 'self'` + `nosniff` 토글 | `'self'` 위의 업로드 파일이 스크립트로 실행됨 / MIME 검사와 `nosniff` 의 역할 |
+| 1부 Lab 7 | 보호 페이지엔 `script-src 'self'`, `/legacy/search` 엔 없음 | CSP 없는 같은 origin 페이지 하나에서 보호 페이지(`/account`)의 비밀값을 읽어 감 |
+
+`/try` — **CSP 정책 실험실** (2장): 아래 섹션 참고.
+
+#### 2부 — Strict CSP · script-src 밖의 구멍 · Report-Only
+
+| 랩 | 정책 | 보여 주는 것 |
+| --- | --- | --- |
+| 2부 Lab 1 | `script-src 'nonce-…'` | 이번 응답의 nonce 를 가진 스크립트만 실행. 고정 nonce(`static=1`)면 무의미 |
+| 2부 Lab 2 | `+ 'strict-dynamic'` | nonce 로 신뢰한 로더가 `createElement` 로 추가한 스크립트에 신뢰 전파 (gtag.js 패턴) |
+| 2부 Lab 3 | `connect-src` / `default-src` | 공급망 공격: script-src 로는 못 막는 "우리 번들 속 악성 의존성"의 유출 경로 차단 |
+| 2부 Lab 4 | `base-uri` · `form-action` · `object-src` | `<base>` 주입으로 우리 nonce 스크립트 하이재킹, 가짜 로그인 폼으로 비밀번호 전송 |
+| 2부 Lab 5 | `Content-Security-Policy-Report-Only` | 막지 않고 보고만. `/violations` 에 리포트 수집. 라이브러리의 `new Function` 프로브(zod) 함정 |
+| 2부 Lab 6 | `frame-ancestors` | 클릭재킹: 공격자 페이지(`:4000/clickjack`)가 우리 페이지를 투명 iframe 으로 덮음 |
+
+첫 화면은 1부 랩만 펼쳐 보여 주고, 2부 랩은 "다음 시간" 아래 접혀 있습니다.
 
 ### CSP 정책 실험실 — `/try`
 
